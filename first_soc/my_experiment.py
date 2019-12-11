@@ -1,25 +1,34 @@
-import csv
-import ctypes
+import json
+import operator
 import os
 import shutil
 from copy import copy
-from multiprocessing.pool import Pool
-from typing import Dict, List
 
-import matplotlib.pyplot as plt
-
-from hestia.connection_parameters import ConnectionParameters
 from hestia.experiment import Experiment
+from hestia.memory_parameters import MemoryParameters
 from hestia.model import Model
+
+from first_soc.containers import PipelinedTestBench
 
 
 class MyExperimentParameters:
     def __init__(self):
-        self.num_transactions = 100
-        self.latencies = [1]
-        self.capacities = [1]
-        self.read_rates = [1]
-        self.write_rates = [1]
+        self.num_operations_per_iteration = 100
+        self.num_iterations = 100
+        self.instruction_rates = [1,2]
+        self.data_rates = [1,2,3,4,5]
+        self.fetcher_rates = copy(self.data_rates)
+        self.decoder_rates = copy(self.data_rates)
+        self.executor_rates = copy(self.data_rates)
+        self.write_back_rates = copy(self.data_rates)
+
+
+def calculate_area(name: str) -> int:
+    rates = name.split(".")
+    result = 0
+    for rate in rates:
+        result += int(rate.split("_")[-1])
+    return result
 
 
 class MyExperiment(Experiment):
@@ -32,68 +41,75 @@ class MyExperiment(Experiment):
         self.create_tests()
 
     def create_tests(self) -> None:
-        params = ConnectionParameters()
-        params.domain = ctypes.c_char_p(self.domain.encode("utf-8"))
-        params.is_timed = True
-        for read_rate in self.params.read_rates:
-            for write_rate in self.params.write_rates:
-                for latency in self.params.latencies:
-                    for capacity in self.params.capacities:
-                        model = Model(self.path)
-                        model.add_clock_domain(self.domain, 1)
-                        test_name = "r_{}.w_{}.l_{}.c_{}".format(read_rate, write_rate, latency, capacity)
 
-                        test = NumberTestBench(test_name, self.domain)
-                        test.set_num_transactions(self.params.num_transactions)
-                        params.read_rate = read_rate
-                        params.write_rate = write_rate
-                        params.latency = latency
-                        params.capacity = capacity
-                        test.set_connection_params(params)
-                        test.build(model)
+        for instruction_rate in self.params.instruction_rates:
+            for data_rate in self.params.data_rates:
+                for fetcher_rate in self.params.fetcher_rates:
+                    for decoder_rate in self.params.decoder_rates:
+                        for executor_rate in self.params.executor_rates:
+                            for write_back_rates in self.params.write_back_rates:
+                                model = Model(self.path)
+                                model.add_clock_domain(self.domain, 1)
 
-                        model.attach_basic_stats_to_connections()
+                                memory_name = "mem"
+                                memory_params = MemoryParameters()
+                                memory_params.discrete = False
+                                memory_params.size = 1024
 
-                        model.create_csv_sampler("sampler", "counters.csv", 1, "clk")
-                        model.attach_counters_to_sampler("sampler", ".*\.stats\..*")
+                                model.create_memory(memory_name, memory_params)
 
-                        self.tests[test.name] = model
 
-    @staticmethod
-    def get_data(test: str) -> Dict[str, List[int]]:
-        results = {"production": [], "consumption": []}
-        with open(os.path.join(test, "counters.csv"), 'r') as f:
-            data = csv.DictReader(f)
-            for row in data:
-                for column in row:
-                    if column.endswith("stats.pushed"):
-                        results["production"].append(row[column])
-                    elif column.endswith("stats.popped"):
-                        results["consumption"].append(row[column])
+                                test_name = "i_{}.d_{}.f_{}.d_{}.e_{}.w_{}".format(instruction_rate, data_rate, fetcher_rate, decoder_rate, executor_rate, write_back_rates)
 
-        # Remove idle portion of end of test
-        results["production"] = results["production"][:-10]
-        results["consumption"] = results["consumption"][:-10]
-        return results
+                                test = PipelinedTestBench(test_name, self.domain, memory_name)
+                                test.set_instruction_memory_params(rate=instruction_rate, capacity=10, latency=0)
+                                test.set_data_memory_params(rate=data_rate, capacity=10, latency=0)
+                                test.set_fetcher_params(rate=fetcher_rate, capacity=10, latency=0)
+                                test.set_decoder_params(rate=decoder_rate, capacity=10, latency=0)
+                                test.set_executor_params(rate=executor_rate, capacity=10, latency=0)
+                                test.set_write_back_params(rate=write_back_rates, capacity=10, latency=0)
 
-    @staticmethod
-    def generate_report(name: str):
-        data = MyExperiment.get_data(name)
-        plt.plot(data["production"], label="Write", drawstyle="steps")
-        plt.plot(data["consumption"], label="Read", drawstyle="steps")
-        plt.xlabel("Clocks")
-        plt.ylabel("Transactions")
-        plt.legend()
-        plt.savefig(os.path.join("results", name + ".png"))
-        plt.clf()
+                                test.build(model)
 
-    def generate_reports(self, number_of_jobs: int = 4):
+                                self.tests[test.name] = model
+
+    def generate_report(self):
         if os.path.exists("results"):
             shutil.rmtree("results")
         os.mkdir("results")
-        with Pool(number_of_jobs) as p:
-            p.map(MyExperiment.generate_report, self.tests.keys())
+        os.chdir("results")
+        test_times = {}
+        for test in self.tests:
+            test_times[test] = self.tests[test].get_time()
 
+        with open("top_5.json", 'w') as f:
+            json.dump(dict(sorted(test_times.items(), key=operator.itemgetter(1))[:5]), f)
+
+        with open("top_10.json", 'w') as f:
+            json.dump(dict(sorted(test_times.items(), key=operator.itemgetter(1))[:10]), f)
+
+        with open("all.json", 'w') as f:
+            json.dump(dict(sorted(test_times.items(), key=operator.itemgetter(1))), f)
+
+        winner = {"name": "", "clocks": 0, "area" : 0}
+        for test in test_times:
+            is_winner = False
+            if winner["clocks"] is 0:
+                is_winner = True
+            elif test_times[test] < winner["clocks"]:
+                is_winner = True
+            elif test_times[test] == winner["clocks"] and winner["area"] > calculate_area(test):
+                is_winner = True
+
+            if is_winner:
+                winner["name"] = test
+                winner["clocks"] = test_times[test]
+                winner["area"] = calculate_area(test)
+
+        with open("winner.json", 'w') as f:
+            json.dump(winner, f)
+
+        os.chdir("..")
 
 
 def run():
@@ -113,14 +129,9 @@ def run():
     os.mkdir("_tests")
     os.chdir("_tests")
     params = MyExperimentParameters()
-    params.num_transactions = 20
-    params.read_rates = [1, 2, 3, 5, 10]
-    params.write_rates = copy(params.read_rates)
-    params.latencies = copy(params.read_rates)
-    params.capacities = copy(params.read_rates)
     experiment = MyExperiment("my_experiment", args.model_path, params)
-    experiment.run(10)
-    experiment.generate_reports()
+    experiment.run(4)
+    experiment.generate_report()
     os.chdir("..")
 
 if __name__ == "__main__":

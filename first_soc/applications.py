@@ -27,8 +27,8 @@ class LoopApplication(Component):
         self.ports["doorbell"] = Port("doorbell", PortType.READ, self)
 
         self.parameters["memory_name"] = Parameter("memory_name", ParameterType.STRING, memory_name)
-        self.parameters["num_iterations"] = Parameter("num_iterations", ParameterType.STRING, str(1))
-        self.parameters["num_ops_per_iteration"] = Parameter("num_ops_per_iteration", ParameterType.STRING, str(1))
+        self.parameters["num_iterations"] = Parameter("num_iterations", ParameterType.STRING, str(100))
+        self.parameters["num_ops_per_iteration"] = Parameter("num_ops_per_iteration", ParameterType.STRING, str(100))
         self.parameters["mode"] = Parameter("mode", ParameterType.STRING, "alu")
 
     def set_memory_name(self, memory_name: str) -> None:
